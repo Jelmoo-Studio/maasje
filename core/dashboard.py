@@ -1,0 +1,1300 @@
+"""Genereer docs/index.html — neobrutalism dashboard met client-side filters."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+from jinja2 import Template
+
+import config
+from core import filters
+from scrapers.base import Listing, normalize_wijk
+
+
+DOCS_PATH = Path(__file__).resolve().parents[1] / "docs" / "index.html"
+
+
+_TEMPLATE = Template(
+    r"""<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<title>HUUR MAASTRICHT</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Overzicht van alle huurwoningen in Maastricht tot {{ max_price }}.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+
+:root{
+  --ink:#0A0A0A;
+  --paper:#F5E8D0;
+  --paper-deep:#E8D7B1;
+  --white:#FFFFFF;
+  --pink:#FF6B9D;
+  --pink-deep:#FF3D7F;
+  --yellow:#FFE15B;
+  --yellow-deep:#FFCC00;
+  --blue:#6BBEFF;
+  --blue-deep:#2E96EE;
+  --lime:#C7F45A;
+  --lime-deep:#A4D838;
+  --border-thin:2px solid var(--ink);
+  --border:3px solid var(--ink);
+  --border-thick:4px solid var(--ink);
+  --shadow-sm:3px 3px 0 var(--ink);
+  --shadow:6px 6px 0 var(--ink);
+  --shadow-lg:8px 8px 0 var(--ink);
+}
+
+body{
+  font-family:'JetBrains Mono','SFMono-Regular',Menlo,monospace;
+  background:var(--paper);
+  color:var(--ink);
+  min-height:100vh;
+  font-weight:500;
+  line-height:1.5;
+  background-image:
+    linear-gradient(var(--paper-deep) 1px,transparent 1px),
+    linear-gradient(90deg,var(--paper-deep) 1px,transparent 1px);
+  background-size:36px 36px;
+  background-position:-1px -1px;
+}
+
+.wrap{max-width:1320px;margin:0 auto;padding:2.5rem 1.5rem 6rem}
+
+/* === MASTHEAD === */
+.masthead{
+  display:grid;
+  grid-template-columns:1fr auto;
+  align-items:end;
+  gap:1.5rem;
+  border-bottom:var(--border-thick);
+  padding-bottom:1.5rem;
+  margin-bottom:2rem;
+}
+h1{
+  font-family:'Archivo Black',sans-serif;
+  font-size:clamp(3.2rem,9vw,7rem);
+  line-height:.82;
+  margin:0;
+  letter-spacing:-.025em;
+  text-transform:uppercase;
+}
+h1 .row2{display:block;color:var(--pink-deep)}
+h1 .stars{
+  font-size:.32em;
+  vertical-align:top;
+  letter-spacing:0;
+  margin-left:.4em;
+  color:var(--ink);
+  display:inline-block;
+  transform:translateY(.4em);
+}
+.tag{
+  display:inline-block;
+  background:var(--ink);
+  color:var(--yellow);
+  font-family:'Archivo Black',sans-serif;
+  padding:.45rem .8rem;
+  font-size:.85rem;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  border:var(--border-thin);
+  box-shadow:var(--shadow-sm);
+  transform:rotate(-2deg);
+  white-space:nowrap;
+}
+
+.subline{
+  margin-top:1rem;
+  display:flex;
+  flex-wrap:wrap;
+  gap:.5rem 1.25rem;
+  align-items:center;
+  font-size:.8rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.pulse{
+  display:inline-block;
+  width:11px;height:11px;
+  background:var(--lime-deep);
+  border:var(--border-thin);
+  animation:pulse 1.8s cubic-bezier(.4,0,.6,1) infinite;
+}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.35);background:var(--lime)}}
+.bullet{display:inline-block;width:6px;height:6px;background:var(--ink);transform:rotate(45deg)}
+
+/* === STATS === */
+.stats{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+  gap:1.25rem;
+  margin-bottom:2rem;
+}
+.stat{
+  border:var(--border-thick);
+  padding:1.1rem 1.25rem 1.25rem;
+  box-shadow:var(--shadow);
+  position:relative;
+  transition:transform .15s ease,box-shadow .15s ease;
+}
+.stat:hover{transform:translate(2px,2px);box-shadow:4px 4px 0 var(--ink)}
+.stat.s1{background:var(--pink)}
+.stat.s2{background:var(--blue)}
+.stat.s3{background:var(--yellow)}
+.stat.s4{background:var(--lime)}
+.stat.s5{background:var(--white)}
+.stat .num{
+  font-family:'Archivo Black',sans-serif;
+  font-size:2.8rem;
+  line-height:.9;
+  letter-spacing:-.02em;
+  display:block;
+}
+.stat .label{
+  font-size:.72rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  margin-top:.45rem;
+  display:block;
+}
+.stat .corner{
+  position:absolute;
+  top:-12px;right:-12px;
+  width:28px;height:28px;
+  background:var(--ink);
+  color:var(--paper);
+  border:var(--border-thin);
+  font-family:'Archivo Black',sans-serif;
+  font-size:.9rem;
+  display:grid;
+  place-items:center;
+}
+
+/* === FILTERS === */
+.filters{
+  background:var(--white);
+  border:var(--border-thick);
+  box-shadow:var(--shadow);
+  margin-bottom:2.25rem;
+}
+.filter-row{
+  display:flex;
+  align-items:center;
+  gap:.65rem;
+  flex-wrap:wrap;
+  padding:.95rem 1.25rem;
+  border-bottom:var(--border-thin);
+}
+.filter-row:last-child{border-bottom:none}
+.filter-label{
+  font-weight:700;
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+  min-width:88px;
+  display:flex;
+  align-items:center;
+  gap:.5rem;
+}
+.filter-label::before{
+  content:"";
+  display:inline-block;
+  width:10px;height:10px;
+  background:var(--ink);
+}
+
+.pill{
+  font-family:inherit;
+  font-weight:700;
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+  background:var(--white);
+  color:var(--ink);
+  border:var(--border);
+  padding:.5rem .85rem;
+  cursor:pointer;
+  transition:transform .12s ease,box-shadow .12s ease,background .12s ease;
+  box-shadow:3px 3px 0 var(--ink);
+  position:relative;
+  user-select:none;
+}
+.pill:hover{transform:translate(1px,1px);box-shadow:2px 2px 0 var(--ink)}
+.pill:focus-visible{outline:3px solid var(--pink-deep);outline-offset:3px}
+.pill[aria-pressed="true"]{
+  background:var(--ink);
+  color:var(--paper);
+  transform:translate(3px,3px);
+  box-shadow:0 0 0 var(--ink);
+}
+.pill[data-value="pref"][aria-pressed="true"]{background:var(--ink);color:var(--yellow)}
+.pill[data-value="appartement"][aria-pressed="true"]{background:var(--pink-deep);color:var(--white);box-shadow:0 0 0 var(--ink)}
+.pill[data-value="studio"][aria-pressed="true"]{background:var(--blue-deep);color:var(--white);box-shadow:0 0 0 var(--ink)}
+
+/* === VIEW TOGGLE === */
+.view-toggle{
+  display:flex;
+  gap:0;
+  margin-bottom:1.5rem;
+  border:var(--border-thick);
+  background:var(--white);
+  box-shadow:var(--shadow);
+  width:fit-content;
+}
+.view-btn{
+  font-family:'Archivo Black',sans-serif;
+  font-size:.95rem;
+  background:var(--white);
+  color:var(--ink);
+  border:none;
+  padding:.85rem 1.5rem;
+  cursor:pointer;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  display:flex;
+  align-items:center;
+  gap:.5rem;
+  transition:background .12s ease;
+}
+.view-btn:not(:last-child){border-right:var(--border-thick)}
+.view-btn:hover{background:var(--paper)}
+.view-btn[aria-pressed="true"]{background:var(--ink);color:var(--yellow)}
+.view-btn .ico{
+  display:inline-block;
+  width:18px;height:18px;
+  background:var(--ink);
+  border:2px solid var(--ink);
+}
+.view-btn[aria-pressed="true"] .ico{background:var(--yellow);border-color:var(--yellow)}
+.view-btn[data-view="grid"] .ico{
+  background-image:linear-gradient(var(--ink) 50%,transparent 50%),linear-gradient(90deg,var(--ink) 50%,transparent 50%);
+  background-size:8px 8px;
+  background-color:var(--white);
+}
+.view-btn[aria-pressed="true"][data-view="grid"] .ico{
+  background-image:linear-gradient(var(--yellow) 50%,transparent 50%),linear-gradient(90deg,var(--yellow) 50%,transparent 50%);
+  background-color:var(--ink);
+}
+.view-btn[data-view="map"] .ico{
+  background:radial-gradient(circle at 50% 35%,var(--ink) 30%,transparent 30%),var(--white);
+  border-radius:50% 50% 50% 50%/40% 40% 70% 70%;
+  position:relative;
+}
+
+.result-bar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:1.25rem;
+  font-weight:700;
+  font-size:.85rem;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.result-bar .count{
+  background:var(--ink);
+  color:var(--paper);
+  padding:.45rem .85rem;
+  border:var(--border-thin);
+  font-family:'Archivo Black',sans-serif;
+  letter-spacing:.06em;
+}
+#visible-count{color:var(--yellow)}
+.reset-btn{
+  font-family:inherit;
+  font-weight:700;
+  background:transparent;
+  border:none;
+  text-decoration:underline;
+  text-decoration-thickness:3px;
+  text-underline-offset:4px;
+  cursor:pointer;
+  font-size:.78rem;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  color:var(--ink);
+}
+.reset-btn:hover{color:var(--pink-deep)}
+
+/* === GRID === */
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(290px,1fr));
+  gap:1.5rem;
+}
+
+/* === CARD === */
+.card{
+  background:var(--white);
+  border:var(--border-thick);
+  box-shadow:var(--shadow-lg);
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  transition:transform .18s cubic-bezier(.2,.8,.3,1),box-shadow .18s cubic-bezier(.2,.8,.3,1);
+  animation:drop .45s cubic-bezier(.2,.8,.3,1) both;
+}
+.card:hover{transform:translate(4px,4px);box-shadow:4px 4px 0 var(--ink)}
+@keyframes drop{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+.card-tag{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:.7rem 1.1rem;
+  border-bottom:var(--border-thick);
+  font-family:'Archivo Black',sans-serif;
+  font-size:1rem;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+}
+.card[data-type="appartement"] .card-tag{background:var(--pink)}
+.card[data-type="studio"] .card-tag{background:var(--blue)}
+.card[data-preferred="true"] .card-tag{background:var(--yellow)}
+
+.card-tag .type-mark{
+  display:inline-flex;
+  align-items:center;
+  gap:.4rem;
+}
+.card-tag .type-mark::before{
+  content:"";
+  width:14px;height:14px;
+  background:var(--ink);
+  display:inline-block;
+}
+.card[data-type="studio"] .card-tag .type-mark::before{transform:rotate(45deg)}
+.card[data-type="appartement"] .card-tag .type-mark::before{border-radius:0}
+
+.card-tag .star{
+  font-size:1.1rem;
+  color:var(--ink);
+}
+
+/* Diagonal VOORKEUR ribbon on preferred cards */
+.card[data-preferred="true"]::after{
+  content:"★ VOORKEUR ★";
+  position:absolute;
+  top:24px;right:-58px;
+  background:var(--ink);
+  color:var(--yellow);
+  font-family:'Archivo Black',sans-serif;
+  font-size:.72rem;
+  letter-spacing:.14em;
+  padding:.4rem 3.5rem;
+  transform:rotate(38deg);
+  z-index:5;
+  pointer-events:none;
+  border-top:2px solid var(--yellow-deep);
+  border-bottom:2px solid var(--yellow-deep);
+  text-align:center;
+  white-space:nowrap;
+}
+
+.card-body{
+  padding:1.2rem 1.2rem 0;
+  display:flex;
+  flex-direction:column;
+  gap:.6rem;
+  flex:1;
+}
+.price{
+  font-family:'Archivo Black',sans-serif;
+  font-size:2.4rem;
+  line-height:.95;
+  letter-spacing:-.02em;
+}
+.price .per{
+  font-family:'JetBrains Mono',monospace;
+  font-size:.7rem;
+  font-weight:700;
+  opacity:.55;
+  margin-left:.35rem;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+}
+.title{
+  font-weight:700;
+  font-size:1.05rem;
+  line-height:1.3;
+  margin:.1rem 0;
+}
+.loc{
+  font-size:.82rem;
+  font-weight:500;
+  opacity:.75;
+  display:flex;
+  align-items:flex-start;
+  gap:.4rem;
+}
+.loc::before{
+  content:"↳";
+  font-weight:700;
+  flex-shrink:0;
+}
+.specs{
+  display:flex;
+  flex-wrap:wrap;
+  gap:.55rem;
+  margin-top:.35rem;
+  padding-top:.7rem;
+  border-top:2px dashed var(--ink);
+}
+.spec{
+  font-size:.78rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  background:var(--paper);
+  border:var(--border-thin);
+  padding:.18rem .5rem;
+}
+.spec-yes{
+  background:var(--lime);
+  border:var(--border-thin);
+}
+
+.wijk-tag{
+  display:inline-block;
+  align-self:flex-start;
+  background:var(--ink);
+  color:var(--paper);
+  font-family:'Archivo Black',sans-serif;
+  font-size:.72rem;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  padding:.25rem .6rem;
+  margin-bottom:.15rem;
+  border:var(--border-thin);
+}
+.card[data-preferred="true"] .wijk-tag{background:var(--ink);color:var(--yellow)}
+
+.todo{
+  margin-top:.4rem;
+  border:2px dashed var(--ink);
+  padding:.55rem .7rem;
+  background:var(--paper);
+}
+.todo-head{
+  font-size:.68rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.14em;
+  margin-bottom:.35rem;
+  opacity:.7;
+}
+.todo ul{
+  list-style:none;
+  margin:0;padding:0;
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:.15rem .6rem;
+}
+.todo li{
+  font-size:.74rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+  display:flex;
+  align-items:center;
+  gap:.4rem;
+}
+.todo li::before{
+  content:"";
+  display:inline-block;
+  width:13px;height:13px;
+  background:var(--white);
+  border:var(--border-thin);
+  flex-shrink:0;
+  font-size:.7rem;
+  line-height:1;
+  text-align:center;
+}
+.todo li.yes::before{content:"✓";background:var(--lime);color:var(--ink);font-weight:900;font-family:'Archivo Black',sans-serif}
+.todo li.no::before{content:"✕";background:var(--pink);color:var(--ink);font-weight:900;font-family:'Archivo Black',sans-serif}
+.todo li.yes{opacity:1}
+.todo li.no{opacity:.55;text-decoration:line-through}
+
+/* Paywall indicator — subtiel slotje */
+.paywall-mark{
+  display:inline-flex;
+  align-items:center;
+  gap:.2rem;
+  font-size:.65rem;
+  font-weight:700;
+  letter-spacing:.1em;
+  color:var(--ink);
+  opacity:.6;
+  background:var(--paper);
+  border:1.5px solid var(--ink);
+  padding:.08rem .35rem;
+  text-transform:uppercase;
+}
+.paywall-mark::before{content:"⌃";font-weight:900}
+
+/* Popup-specifieke styling */
+.pop-wijk{
+  display:inline-block;
+  align-self:flex-start;
+  background:var(--ink);
+  color:var(--paper);
+  font-family:'Archivo Black',sans-serif;
+  font-size:.65rem;
+  letter-spacing:.12em;
+  padding:.18rem .45rem;
+  border:var(--border-thin);
+}
+.pop-specs span.yes{background:var(--lime)}
+.meta-row{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-size:.7rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  opacity:.7;
+  margin-top:.4rem;
+}
+
+.card-actions{
+  padding:1rem 1.2rem 1.2rem;
+  display:flex;
+  gap:.5rem;
+  align-items:stretch;
+}
+.icon-btn{
+  font-family:'JetBrains Mono',monospace;
+  font-size:1.1rem;
+  font-weight:700;
+  background:var(--white);
+  color:var(--ink);
+  border:var(--border-thick);
+  padding:0 .7rem;
+  cursor:pointer;
+  box-shadow:3px 3px 0 var(--ink);
+  transition:transform .12s ease,box-shadow .12s ease,background .12s ease;
+  line-height:1;
+  display:grid;
+  place-items:center;
+  min-width:42px;
+}
+.icon-btn:hover{transform:translate(1px,1px);box-shadow:2px 2px 0 var(--ink)}
+.icon-btn.save-btn[aria-pressed="true"]{background:var(--yellow);transform:translate(3px,3px);box-shadow:0 0 0 var(--ink)}
+.icon-btn.hide-btn[aria-pressed="true"]{background:var(--ink);color:var(--paper);transform:translate(3px,3px);box-shadow:0 0 0 var(--ink)}
+.card-actions .btn{flex:1}
+
+/* Saved state — gele inset ring */
+.card[data-status="saved"]{
+  box-shadow:inset 0 0 0 4px var(--yellow),8px 8px 0 var(--ink);
+}
+.card[data-status="saved"]:hover{
+  box-shadow:inset 0 0 0 4px var(--yellow),4px 4px 0 var(--ink);
+}
+.card[data-status="saved"]::before{
+  content:"♥";
+  position:absolute;
+  top:4px;left:4px;
+  width:28px;height:28px;
+  background:var(--yellow);
+  color:var(--ink);
+  border:var(--border-thin);
+  display:grid;place-items:center;
+  font-size:.95rem;
+  font-family:'Archivo Black',sans-serif;
+  z-index:4;
+}
+
+/* Hidden state — fade + grote X stamp */
+.card[data-status="hidden"]{
+  opacity:.45;
+  filter:grayscale(.4);
+}
+.card[data-status="hidden"]:hover{opacity:.75;filter:grayscale(0)}
+.card[data-status="hidden"]::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  background-image:
+    linear-gradient(135deg,transparent calc(50% - 2px),var(--ink) calc(50% - 2px),var(--ink) calc(50% + 2px),transparent calc(50% + 2px)),
+    linear-gradient(45deg,transparent calc(50% - 2px),var(--ink) calc(50% - 2px),var(--ink) calc(50% + 2px),transparent calc(50% + 2px));
+  pointer-events:none;
+  opacity:.15;
+  z-index:2;
+}
+.btn{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:.85rem 1rem;
+  background:var(--ink);
+  color:var(--paper);
+  border:var(--border-thick);
+  text-decoration:none;
+  font-family:'Archivo Black',sans-serif;
+  font-size:.95rem;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+  transition:background .15s ease;
+  box-shadow:3px 3px 0 var(--pink-deep);
+}
+.card[data-type="studio"] .btn{box-shadow:3px 3px 0 var(--blue-deep)}
+.card[data-preferred="true"] .btn{box-shadow:3px 3px 0 var(--yellow-deep)}
+.btn:hover{background:var(--pink-deep);box-shadow:3px 3px 0 var(--ink)}
+.card[data-type="studio"] .btn:hover{background:var(--blue-deep)}
+.card[data-preferred="true"] .btn:hover{background:var(--ink);color:var(--yellow);box-shadow:3px 3px 0 var(--ink)}
+.btn .arrow{font-size:1.2rem;line-height:1}
+
+/* === MAP === */
+.map-wrap{
+  border:var(--border-thick);
+  box-shadow:var(--shadow-lg);
+  background:var(--white);
+  overflow:hidden;
+  position:relative;
+}
+#map{
+  width:100%;
+  height:min(74vh,700px);
+  background:var(--paper);
+}
+#map.hidden,.grid.hidden{display:none}
+.leaflet-container{font-family:'JetBrains Mono',monospace}
+.leaflet-popup-content-wrapper{
+  border-radius:0 !important;
+  border:var(--border-thick);
+  box-shadow:var(--shadow);
+  padding:0 !important;
+  background:var(--white);
+}
+.leaflet-popup-tip{box-shadow:var(--shadow-sm);background:var(--ink)}
+.leaflet-popup-content{margin:0 !important;width:240px !important}
+.leaflet-control-zoom a{
+  border:var(--border-thin) !important;
+  border-radius:0 !important;
+  font-family:'Archivo Black',sans-serif !important;
+  color:var(--ink) !important;
+  background:var(--white) !important;
+  box-shadow:3px 3px 0 var(--ink);
+}
+.leaflet-control-zoom a:hover{background:var(--yellow) !important}
+.leaflet-control-attribution{
+  font-family:'JetBrains Mono',monospace !important;
+  font-size:.65rem !important;
+  background:var(--white) !important;
+  border-top:var(--border-thin) !important;
+  border-left:var(--border-thin) !important;
+}
+
+/* === MAP PIN === */
+.pin-wrap{background:transparent !important;border:none !important}
+.pin{
+  display:inline-flex;
+  align-items:center;
+  gap:.2rem;
+  font-family:'Archivo Black',sans-serif;
+  font-size:.78rem;
+  background:var(--white);
+  color:var(--ink);
+  border:3px solid var(--ink);
+  padding:.18rem .45rem;
+  box-shadow:3px 3px 0 var(--ink);
+  letter-spacing:.02em;
+  white-space:nowrap;
+  transform-origin:bottom left;
+  transition:transform .12s ease;
+  cursor:pointer;
+}
+.pin:hover{transform:translate(-1px,-1px) scale(1.08);z-index:1000;box-shadow:4px 4px 0 var(--ink)}
+.pin.t-appartement{background:var(--pink)}
+.pin.t-studio{background:var(--blue)}
+.pin.pref{background:var(--yellow)}
+.pin.pref::before{content:"★";margin-right:.15rem}
+.pin.saved{outline:3px solid var(--yellow-deep);outline-offset:2px}
+.pin.saved::after{content:"♥";margin-left:.2rem}
+
+/* Popup mini-card */
+.pop{padding:0}
+.pop .pop-head{
+  padding:.55rem .8rem;
+  font-family:'Archivo Black',sans-serif;
+  font-size:.85rem;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+  border-bottom:var(--border-thick);
+  display:flex;justify-content:space-between;align-items:center;
+}
+.pop[data-type="appartement"] .pop-head{background:var(--pink)}
+.pop[data-type="studio"] .pop-head{background:var(--blue)}
+.pop[data-preferred="true"] .pop-head{background:var(--yellow)}
+.pop .pop-body{padding:.7rem .85rem .85rem;display:flex;flex-direction:column;gap:.3rem}
+.pop .pop-price{font-family:'Archivo Black',sans-serif;font-size:1.6rem;line-height:1}
+.pop .pop-title{font-weight:700;font-size:.9rem;line-height:1.25}
+.pop .pop-loc{font-size:.75rem;opacity:.7}
+.pop .pop-specs{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.2rem}
+.pop .pop-specs span{font-size:.7rem;font-weight:700;text-transform:uppercase;padding:.1rem .35rem;background:var(--paper);border:var(--border-thin)}
+.pop .pop-actions{display:flex;gap:.35rem;margin-top:.5rem}
+.pop .pop-actions .icon-btn{
+  font-size:.95rem;
+  min-width:34px;
+  padding:0 .5rem;
+  border:var(--border-thin);
+  box-shadow:2px 2px 0 var(--ink);
+}
+.pop .pop-actions .icon-btn[aria-pressed="true"].save-btn{background:var(--yellow);box-shadow:0 0 0 var(--ink);transform:translate(2px,2px)}
+.pop .pop-actions .icon-btn[aria-pressed="true"].hide-btn{background:var(--ink);color:var(--paper);box-shadow:0 0 0 var(--ink);transform:translate(2px,2px)}
+.pop .pop-btn{
+  flex:1;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:.5rem .7rem;
+  background:var(--ink);color:var(--paper);
+  text-decoration:none;
+  font-family:'Archivo Black',sans-serif;
+  font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;
+  border:var(--border-thin);
+}
+.pop .pop-btn:hover{background:var(--pink-deep)}
+
+/* === EMPTY === */
+.empty{
+  grid-column:1 / -1;
+  text-align:center;
+  padding:4rem 2rem;
+  background:var(--white);
+  border:var(--border-thick);
+  box-shadow:var(--shadow);
+}
+.empty h2{
+  font-family:'Archivo Black',sans-serif;
+  font-size:2rem;
+  text-transform:uppercase;
+  margin:0 0 .5rem;
+  letter-spacing:-.01em;
+}
+.empty p{margin:0;font-weight:700;text-transform:uppercase;letter-spacing:.05em;font-size:.85rem}
+
+/* === FOOTER === */
+footer{
+  margin-top:5rem;
+  padding-top:1.5rem;
+  border-top:var(--border-thick);
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:space-between;
+  align-items:center;
+  gap:1rem;
+  font-size:.75rem;
+  font-weight:700;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+}
+footer .marks{letter-spacing:.4em}
+
+/* === MOBILE === */
+@media (max-width:640px){
+  .masthead{grid-template-columns:1fr;align-items:start}
+  .tag{justify-self:start;transform:rotate(-2deg) translateX(0)}
+  .filter-label{min-width:auto;width:100%;margin-bottom:.25rem}
+  .filter-row{padding:.85rem 1rem}
+  .stat .num{font-size:2.3rem}
+}
+
+@media print{
+  body{background:white}
+  .card{break-inside:avoid;box-shadow:none}
+  .filters,footer{display:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div>
+    <h1>HUUR<br><span class="row2">MAAS&shy;TRICHT</span><span class="stars">✱✱✱</span></h1>
+    <div class="subline">
+      <span><span class="pulse"></span> LIVE</span>
+      <span class="bullet"></span>
+      <span>{{ generated_at }}</span>
+      <span class="bullet"></span>
+      <span>{{ total_count }} TOTAAL</span>
+    </div>
+  </div>
+  <div class="tag">MAX €{{ max_price }} &nbsp;/&nbsp; VOORK. €{{ preferred_price }}</div>
+</header>
+
+<section class="stats" aria-label="Statistieken">
+  <div class="stat s1">
+    <span class="corner">A</span>
+    <span class="num" data-stat="appartement">0</span>
+    <span class="label">Appartementen</span>
+  </div>
+  <div class="stat s2">
+    <span class="corner">S</span>
+    <span class="num" data-stat="studio">0</span>
+    <span class="label">Studio's</span>
+  </div>
+  <div class="stat s3">
+    <span class="corner">★</span>
+    <span class="num" data-stat="preferred">0</span>
+    <span class="label">Voorkeur ≤€{{ preferred_price }}</span>
+  </div>
+  <div class="stat s4">
+    <span class="corner">€</span>
+    <span class="num" data-stat="cheapest">—</span>
+    <span class="label">Goedkoopste/mnd</span>
+  </div>
+  <div class="stat s5">
+    <span class="corner">♥</span>
+    <span class="num" data-stat="saved">0</span>
+    <span class="label">Bewaard</span>
+  </div>
+</section>
+
+<section class="filters" aria-label="Filters">
+  <div class="filter-row">
+    <span class="filter-label">Status</span>
+    <button class="pill" data-filter="status" data-value="active" aria-pressed="true">Actief</button>
+    <button class="pill" data-filter="status" data-value="saved" aria-pressed="false">♥ Bewaard</button>
+    <button class="pill" data-filter="status" data-value="hidden" aria-pressed="false">✕ Verborgen</button>
+    <button class="pill" data-filter="status" data-value="all" aria-pressed="false">Alles</button>
+  </div>
+  <div class="filter-row">
+    <span class="filter-label">Type</span>
+    <button class="pill" data-filter="type" data-value="all" aria-pressed="true">Alles</button>
+    <button class="pill" data-filter="type" data-value="appartement" aria-pressed="false">Appartement</button>
+    <button class="pill" data-filter="type" data-value="studio" aria-pressed="false">Studio</button>
+  </div>
+  <div class="filter-row">
+    <span class="filter-label">Prijs</span>
+    <button class="pill" data-filter="price" data-value="all" aria-pressed="true">Alles</button>
+    <button class="pill" data-filter="price" data-value="pref" aria-pressed="false">★ Voorkeur (≤€{{ preferred_price }})</button>
+    <button class="pill" data-filter="price" data-value="0-700" aria-pressed="false">Tot €700</button>
+    <button class="pill" data-filter="price" data-value="700-900" aria-pressed="false">€700-900</button>
+    <button class="pill" data-filter="price" data-value="900-1000" aria-pressed="false">€900-1000</button>
+  </div>
+  {% if wijken_for_filter %}
+  <div class="filter-row">
+    <span class="filter-label">Wijk</span>
+    <button class="pill" data-filter="wijk" data-value="all" aria-pressed="true">Alle wijken</button>
+    {% for w in wijken_for_filter %}
+    <button class="pill" data-filter="wijk" data-value="{{ w.value }}" aria-pressed="false">{{ w.label }}</button>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <div class="filter-row">
+    <span class="filter-label">Sort</span>
+    <button class="pill" data-filter="sort" data-value="newest" aria-pressed="true">Nieuwste</button>
+    <button class="pill" data-filter="sort" data-value="price-asc" aria-pressed="false">Prijs ↑</button>
+    <button class="pill" data-filter="sort" data-value="price-desc" aria-pressed="false">Prijs ↓</button>
+    <button class="pill" data-filter="sort" data-value="surface-desc" aria-pressed="false">Oppervlakte ↓</button>
+  </div>
+</section>
+
+<div class="view-toggle" role="tablist" aria-label="Weergave">
+  <button class="view-btn" data-view="grid" aria-pressed="true"><span class="ico"></span>Grid</button>
+  <button class="view-btn" data-view="map" aria-pressed="false"><span class="ico"></span>Kaart</button>
+</div>
+
+<div class="result-bar">
+  <span class="count"><span id="visible-count">0</span> WONINGEN ZICHTBAAR</span>
+  <button class="reset-btn" id="reset">↺ Reset filters</button>
+</div>
+
+<main class="grid" id="grid"></main>
+<div class="map-wrap hidden" id="map-wrap"><div id="map"></div></div>
+
+<footer>
+  <span>HUUR / MAASTRICHT — PERSOONLIJKE SCRAPER</span>
+  <span class="marks">✱ ✱ ✱</span>
+  <span>UPDATE ELK UUR</span>
+</footer>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
+<script id="listings-data" type="application/json">{{ listings_json|safe }}</script>
+<script>
+(function(){
+  const data = JSON.parse(document.getElementById('listings-data').textContent);
+  const grid = document.getElementById('grid');
+  const mapWrap = document.getElementById('map-wrap');
+  const visibleCount = document.getElementById('visible-count');
+  const resetBtn = document.getElementById('reset');
+
+  const defaults = {status:'active', type:'all', price:'all', wijk:'all', sort:'newest', view:'grid'};
+  const state = Object.assign({}, defaults);
+  const TE_VERIFIEREN = {{ te_verifieren|tojson }};
+
+  // === Persisted per-listing status (saved / hidden) ===
+  const STATUS_KEY = 'huur-maastricht-status-v1';
+  function loadStatus(){
+    try { return JSON.parse(localStorage.getItem(STATUS_KEY) || '{}'); }
+    catch(e){ return {}; }
+  }
+  function saveStatus(s){
+    try { localStorage.setItem(STATUS_KEY, JSON.stringify(s)); } catch(e){}
+  }
+  let statusMap = loadStatus();
+  function statusOf(l){ return statusMap[l.key] || 'active'; }
+  function toggleStatus(key, target){
+    const cur = statusMap[key] || null;
+    if(cur === target) delete statusMap[key];
+    else statusMap[key] = target;
+    saveStatus(statusMap);
+    updateStats();
+    render();
+  }
+  let map = null;
+  let markerLayer = null;
+
+  const NL = new Intl.NumberFormat('nl-NL');
+  const fmt = n => NL.format(n);
+
+  function escHtml(s){
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function formatDate(iso){
+    if(!iso) return '';
+    const d = new Date(iso);
+    if(isNaN(d.getTime())) return iso.slice(0,10);
+    const day = String(d.getDate()).padStart(2,'0');
+    const mon = String(d.getMonth()+1).padStart(2,'0');
+    return day+'/'+mon;
+  }
+
+  function passes(l){
+    const s = statusOf(l);
+    if(state.status === 'active' && s === 'hidden') return false;
+    if(state.status === 'saved' && s !== 'saved') return false;
+    if(state.status === 'hidden' && s !== 'hidden') return false;
+    if(state.type !== 'all' && l.type !== state.type) return false;
+    if(state.wijk !== 'all' && l.wijk_norm !== state.wijk) return false;
+    if(state.price === 'pref'){
+      if(!l.preferred) return false;
+    } else if(state.price !== 'all'){
+      const [lo,hi] = state.price.split('-').map(Number);
+      if(l.price == null || l.price < lo || l.price > hi) return false;
+    }
+    return true;
+  }
+
+  function sort(list){
+    const arr = list.slice();
+    switch(state.sort){
+      case 'price-asc':   arr.sort((a,b)=>(a.price||0)-(b.price||0)); break;
+      case 'price-desc':  arr.sort((a,b)=>(b.price||0)-(a.price||0)); break;
+      case 'surface-desc':arr.sort((a,b)=>(b.surface_m2||0)-(a.surface_m2||0)); break;
+      default: arr.sort((a,b)=>(b.first_seen||'').localeCompare(a.first_seen||''));
+    }
+    return arr;
+  }
+
+  function cardHtml(l, i){
+    const date = formatDate(l.first_seen);
+    const typeLabel = l.type === 'studio' ? 'STUDIO' : (l.type === 'appartement' ? 'APPARTEMENT' : 'WONING');
+    const star = l.preferred ? '★' : '';
+    const specs = [];
+    if(l.surface_m2) specs.push('<span class="spec">'+l.surface_m2+' M²</span>');
+    if(l.rooms) specs.push('<span class="spec">'+l.rooms+' '+(l.rooms === 1 ? 'KAMER' : 'KAMERS')+'</span>');
+    const specsHtml = specs.length ? '<div class="specs">' + specs.join('') + '</div>' : '';
+    const wijkLine = l.wijk ? '<div class="wijk-tag">'+escHtml(l.wijk)+'</div>' : '';
+    const loc = l.address || l.city || '';
+    const price = l.price != null ? '€'+fmt(l.price) : '€?';
+    const delay = Math.min(i, 18) * 0.035;
+    const verified = l.verified || {};
+    const todoItems = TE_VERIFIEREN.map(t => {
+      const v = verified[t];
+      const cls = v === true ? ' class="yes"' : (v === false ? ' class="no"' : '');
+      return '<li'+cls+'>'+escHtml(t)+'</li>';
+    }).join('');
+    const todoHtml = '<div class="todo">'
+      +   '<div class="todo-head">Verifieer op detailpagina</div>'
+      +   '<ul>' + todoItems + '</ul>'
+      + '</div>';
+    const paywallHtml = l.paywall ? '<span class="paywall-mark" title="Detailpagina vereist Premium-account">Premium</span>' : '';
+    return ''
+      + '<article class="card" data-type="'+escHtml(l.type)+'" data-preferred="'+(l.preferred?'true':'false')+'" data-status="'+statusOf(l)+'" data-key="'+escHtml(l.key)+'" style="animation-delay:'+delay+'s">'
+      +   '<div class="card-tag">'
+      +     '<span class="type-mark">'+typeLabel+'</span>'
+      +     '<span class="star">'+star+'</span>'
+      +   '</div>'
+      +   '<div class="card-body">'
+      +     wijkLine
+      +     '<div class="price">'+price+'<span class="per">/mnd incl?</span></div>'
+      +     '<div class="title">'+escHtml(l.title)+'</div>'
+      +     (loc ? '<div class="loc">'+escHtml(loc)+'</div>' : '')
+      +     specsHtml
+      +     todoHtml
+      +     '<div class="meta-row"><span>'+escHtml(l.source)+(l.paywall?' '+paywallHtml:'')+'</span><span>'+date+'</span></div>'
+      +   '</div>'
+      +   '<div class="card-actions">'
+      +     '<button type="button" class="icon-btn save-btn" data-action="save" aria-pressed="'+(statusOf(l)==='saved'?'true':'false')+'" aria-label="Bewaren" title="Bewaren">♥</button>'
+      +     '<button type="button" class="icon-btn hide-btn" data-action="hide" aria-pressed="'+(statusOf(l)==='hidden'?'true':'false')+'" aria-label="Verbergen" title="Verbergen">✕</button>'
+      +     '<a class="btn" href="'+escHtml(l.url)+'" target="_blank" rel="noopener">'
+      +       '<span>Bekijk</span><span class="arrow">→</span>'
+      +     '</a>'
+      +   '</div>'
+      + '</article>';
+  }
+
+  function render(){
+    const filtered = data.filter(passes);
+    const ordered = sort(filtered);
+    visibleCount.textContent = ordered.length + ' / ' + data.length;
+    if(ordered.length === 0){
+      grid.innerHTML = '<div class="empty"><h2>Niets gevonden</h2><p>Pas je filters aan</p></div>';
+    } else {
+      grid.innerHTML = ordered.map(cardHtml).join('');
+    }
+    if(state.view === 'map') renderMap(filtered);
+  }
+
+  function ensureMap(){
+    if(map || typeof L === 'undefined') return map;
+    map = L.map('map', {scrollWheelZoom:true, zoomControl:true, attributionControl:true}).setView([50.8514, 5.6909], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap',
+      maxZoom: 19,
+    }).addTo(map);
+    markerLayer = L.layerGroup().addTo(map);
+    return map;
+  }
+
+  function popHtml(l){
+    const typeLabel = l.type === 'studio' ? 'STUDIO' : 'APPARTEMENT';
+    const star = l.preferred ? '★' : '';
+    const specs = [];
+    if(l.surface_m2) specs.push('<span>'+l.surface_m2+' M²</span>');
+    if(l.rooms) specs.push('<span>'+l.rooms+' '+(l.rooms === 1 ? 'KAMER' : 'KAMERS')+'</span>');
+    const specsHtml = specs.length ? '<div class="pop-specs">' + specs.join('') + '</div>' : '';
+    const wijkHtml = l.wijk ? '<div class="pop-wijk">'+escHtml(l.wijk)+'</div>' : '';
+    const loc = l.address || l.city || '';
+    const price = l.price != null ? '€'+fmt(l.price) : '€?';
+    const s = statusOf(l);
+    return ''
+      + '<div class="pop" data-type="'+escHtml(l.type)+'" data-preferred="'+(l.preferred?'true':'false')+'" data-key="'+escHtml(l.key)+'">'
+      +   '<div class="pop-head"><span>'+typeLabel+'</span><span>'+star+'</span></div>'
+      +   '<div class="pop-body">'
+      +     wijkHtml
+      +     '<div class="pop-price">'+price+'</div>'
+      +     '<div class="pop-title">'+escHtml(l.title)+'</div>'
+      +     (loc ? '<div class="pop-loc">'+escHtml(loc)+'</div>' : '')
+      +     specsHtml
+      +     '<div class="pop-actions">'
+      +       '<button type="button" class="icon-btn save-btn" data-action="save" aria-pressed="'+(s==='saved'?'true':'false')+'" title="Bewaren">♥</button>'
+      +       '<button type="button" class="icon-btn hide-btn" data-action="hide" aria-pressed="'+(s==='hidden'?'true':'false')+'" title="Verbergen">✕</button>'
+      +       '<a class="pop-btn" href="'+escHtml(l.url)+'" target="_blank" rel="noopener"><span>Bekijk</span><span>→</span></a>'
+      +     '</div>'
+      +   '</div>'
+      + '</div>';
+  }
+
+  function renderMap(filtered){
+    const m = ensureMap();
+    if(!m) return;
+    markerLayer.clearLayers();
+    const withCoords = filtered.filter(l => l.lat != null && l.lng != null);
+    const bounds = [];
+    withCoords.forEach(l => {
+      const cls = ['pin','t-'+l.type];
+      if(l.preferred) cls.push('pref');
+      if(statusOf(l) === 'saved') cls.push('saved');
+      const icon = L.divIcon({
+        className:'pin-wrap',
+        html:'<div class="'+cls.join(' ')+'">€'+fmt(l.price)+'</div>',
+        iconSize:[64,28],
+        iconAnchor:[10,28],
+      });
+      const marker = L.marker([l.lat, l.lng], {icon:icon}).bindPopup(popHtml(l), {closeButton:true, maxWidth:260});
+      markerLayer.addLayer(marker);
+      bounds.push([l.lat, l.lng]);
+    });
+    if(bounds.length > 1){
+      m.fitBounds(bounds, {padding:[40,40], maxZoom:15});
+    } else if(bounds.length === 1){
+      m.setView(bounds[0], 15);
+    }
+    setTimeout(() => m.invalidateSize(), 50);
+  }
+
+  function setView(view){
+    state.view = view;
+    document.querySelectorAll('.view-btn').forEach(b => {
+      b.setAttribute('aria-pressed', b.dataset.view === view ? 'true' : 'false');
+    });
+    if(view === 'map'){
+      grid.classList.add('hidden');
+      mapWrap.classList.remove('hidden');
+      render();
+    } else {
+      mapWrap.classList.add('hidden');
+      grid.classList.remove('hidden');
+    }
+  }
+
+  function updateStats(){
+    const aCount = data.filter(l => l.type === 'appartement').length;
+    const sCount = data.filter(l => l.type === 'studio').length;
+    const pCount = data.filter(l => l.preferred).length;
+    const savedCount = data.filter(l => statusOf(l) === 'saved').length;
+    const cheapest = data.reduce((m,l)=> l.price!=null && l.price < m ? l.price : m, Infinity);
+    document.querySelector('[data-stat="appartement"]').textContent = aCount;
+    document.querySelector('[data-stat="studio"]').textContent = sCount;
+    document.querySelector('[data-stat="preferred"]').textContent = pCount;
+    document.querySelector('[data-stat="cheapest"]').textContent = isFinite(cheapest) ? '€'+fmt(cheapest) : '—';
+    document.querySelector('[data-stat="saved"]').textContent = savedCount;
+  }
+
+  function setFilter(filter, value){
+    state[filter] = value;
+    document.querySelectorAll('.pill[data-filter="'+filter+'"]').forEach(b => {
+      b.setAttribute('aria-pressed', b.dataset.value === value ? 'true' : 'false');
+    });
+    render();
+  }
+
+  document.querySelectorAll('.pill').forEach(btn => {
+    btn.addEventListener('click', () => setFilter(btn.dataset.filter, btn.dataset.value));
+  });
+
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', () => setView(btn.dataset.view));
+  });
+
+  // Event-delegation voor save/hide knoppen (zowel grid als popup)
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.icon-btn[data-action]');
+    if(!btn) return;
+    const card = btn.closest('[data-key]');
+    if(!card) return;
+    const key = card.dataset.key;
+    const target = btn.dataset.action === 'save' ? 'saved' : 'hidden';
+    toggleStatus(key, target);
+  });
+
+  resetBtn.addEventListener('click', () => {
+    Object.keys(defaults).forEach(k => {
+      if(k === 'view') return;
+      setFilter(k, defaults[k]);
+    });
+  });
+
+  updateStats();
+  render();
+})();
+</script>
+</body>
+</html>
+"""
+)
+
+
+def render(listings: Iterable[Listing], path: Path = DOCS_PATH) -> None:
+    items = list(listings)
+    items.sort(key=lambda l: (l.first_seen or "", l.price or 0), reverse=True)
+
+    def _wijk_display(l: Listing) -> str:
+        norm = normalize_wijk(l.wijk or "")
+        return config.WIJKEN_DISPLAY.get(norm, l.wijk or "")
+
+    def _verified(l: Listing) -> dict:
+        """Per Te-checken-item: true=ja, false=nee, None=onbekend."""
+        ex = l.extra or {}
+        # Buitenruimte
+        if ex.get("has_balcony") or ex.get("has_garden"):
+            buiten = True
+        elif "has_balcony" in ex and "has_garden" in ex:
+            buiten = False
+        else:
+            buiten = None
+        # Vanaf augustus — alleen "aug" labelen we positief
+        af = ex.get("available_flag")
+        if af == "aug":
+            vanaf = True
+        elif af == "now":
+            vanaf = None  # per direct → kan, maar niet zeker dat tot aug wacht
+        elif af == "later":
+            vanaf = None
+        else:
+            vanaf = None
+        # Gestoffeerd
+        if ex.get("is_gestoffeerd"):
+            gestoffeerd = True
+        elif "is_gestoffeerd" in ex:
+            gestoffeerd = False
+        else:
+            gestoffeerd = None
+        return {
+            "Gestoffeerd": gestoffeerd,
+            "Vanaf augustus": vanaf,
+            "Huurtoeslag mogelijk": None,
+            "Buitenruimte": buiten,
+            "Slaap/keuken apart": None,
+            "Privé voorzieningen": True,  # type filter sluit kamer/student al uit
+        }
+
+    payload = [
+        {
+            "key": l.key,
+            "source": l.source,
+            "title": l.title,
+            "price": l.price,
+            "type": l.type,
+            "surface_m2": l.surface_m2,
+            "rooms": l.rooms,
+            "address": l.address,
+            "city": l.city,
+            "postcode": l.postcode,
+            "wijk": _wijk_display(l),
+            "wijk_norm": normalize_wijk(l.wijk or ""),
+            "url": l.url,
+            "first_seen": l.first_seen,
+            "preferred": filters.is_preferred(l),
+            "verified": _verified(l),
+            "paywall": bool((l.extra or {}).get("paywall")),
+            "lat": l.lat,
+            "lng": l.lng,
+        }
+        for l in items
+    ]
+
+    # Lijst van wijken die in deze run voorkomen, in display-volgorde van config.
+    wijken_present = sorted(
+        {p["wijk_norm"] for p in payload if p["wijk_norm"]},
+        key=lambda w: list(config.WIJKEN_DISPLAY.keys()).index(w) if w in config.WIJKEN_DISPLAY else 999,
+    )
+    wijken_for_filter = [
+        {"value": w, "label": config.WIJKEN_DISPLAY.get(w, w.title())}
+        for w in wijken_present
+    ]
+
+    listings_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+
+    html = _TEMPLATE.render(
+        listings_json=listings_json,
+        total_count=len(payload),
+        max_price=config.MAX_PRICE,
+        preferred_price=config.PREFERRED_PRICE,
+        wijken_for_filter=wijken_for_filter,
+        te_verifieren=list(config.TE_VERIFIEREN),
+        generated_at=datetime.now(timezone.utc).strftime("%d.%m.%Y · %H:%M UTC"),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
