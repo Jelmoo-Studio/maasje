@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "0 * * * *"
   workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: "Stuur alleen een Telegram test-bericht (geen scrape)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -33,6 +38,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_TELEGRAM: ${{ inputs.test_telegram == true && '1' || '0' }}
         run: python main.py
 
       - name: Commit updates

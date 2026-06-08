@@ -72,6 +72,32 @@ def notify(new_listings: Iterable[Listing]) -> None:
                 log.warning("Telegram-melding mislukt voor %s: %s", listing.key, e)
 
 
+def test_message() -> bool:
+    """Stuur één test-bericht naar Telegram. Geeft True bij succes."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        log.error("Geen TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets gevonden.")
+        return False
+    text = (
+        "✅ <b>Huur Maasje · testbericht</b>\n"
+        "Telegram-bot werkt. Vanaf nu krijg je een melding per nieuwe match "
+        "in jouw wijken (≤ €1.000)."
+    )
+    try:
+        r = httpx.post(
+            TELEGRAM_API.format(token=token),
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=config.REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+        log.info("Test-bericht verstuurd.")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log.error("Test-bericht mislukt: %s", e)
+        return False
+
+
 def warn(message: str) -> None:
     """Korte gezondheidswaarschuwing naar Telegram (of log)."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")

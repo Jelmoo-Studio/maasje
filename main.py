@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import random
 import sys
 import time
@@ -37,6 +38,10 @@ def _setup_logging() -> None:
 def run() -> int:
     _setup_logging()
     log = logging.getLogger("main")
+
+    if "--test-telegram" in sys.argv or os.environ.get("TEST_TELEGRAM") == "1":
+        log.info("test-telegram modus")
+        return 0 if notify.test_message() else 1
 
     st = state.load_state()
     all_listings: list[Listing] = []
